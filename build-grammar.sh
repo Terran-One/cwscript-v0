@@ -1,0 +1,1 @@
+antlr4 -o grammar-ouput grammar/CWScript.g4 -visitor

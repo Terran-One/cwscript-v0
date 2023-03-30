@@ -1,0 +1,222 @@
+contract CW20 {
+  
+}
+  
+contract TerraswapFactory extends CW20 {
+
+  state {
+    config: Config
+    tmp_pair_info: TmpPairInfo
+    pairs[u8]: PairInfoRaw
+    allow_native_tokens[list<u8>]: u8
+  }
+
+  instantiate(pair_code_id: u64, token_code_id: u64) {
+    // TODO: set contract version
+    state.config = Config {
+      owner: msginfo.sender, // where is canonical defined?
+      token_code_id,
+      pair_code_id
+    } // CG: implicit "save" operation
+  }
+
+  // fn function is private 
+  fn native_token_decimals {}
+  // `is` should only work with Struct, Error Type and Enum
+  fn query_decimals(account_addr: Addr, asset_info: AssetInfo) -> u8? {
+    
+    if asset_info == Token {
+      someObj.foo = "foo";
+      
+      // wasm smart query
+      // wasm raw query 
+      // chain query
+      let token_info = query Wasm::Smart {
+        contract_addr: asset_info.contract_addr,
+        msg: TokenInfoQuery {}
+      }
+
+      return token_info.decimals
+    } 
+    
+    if asset_info is NativeToken {
+      // it's a Native Token
+      
+      let res = query Wasm::Smart {
+        contract_addr: env.contract.address,
+        
+        // self::native_token_decimals
+        // we can disambiguate with self::{execute,query,etc.}::xyz
+        msg: self::query::native_token_decimals {
+          denom: asset_info.denom
+        }
+      }
+
+      return res.decimals
+    }
+  }
+
+  exec update_config(owner: string?, token_code_id: u64?, pair_code_id: u64?) {
+    // permission check
+
+    if msginfo.sender != state.config.owner {
+      fail Unauthorized()
+    }
+
+    if owner? {
+      state.config.owner = Addr.validate(owner)!
+    }
+
+    if token_code_id? {
+      state.config.token_code_id = token_code_id
+    }
+
+    if pair_code_id? {
+      state.config.pair_code_id = pair_code_id
+    }
+
+    log { action: "update_config" }
+  }
+
+  exec create_pair(asset_infos: (AssetInfo, AssetInfo)) {
+    if asset_infos[0] == asset_infos[1] {
+      fail "same asset"
+    }
+
+    log {
+      action: "create_pair",
+      pair: "${asset_infos[0]}-${asset_infos[1]}"
+    }
+
+    // TODO: check validity, panics, use of ?/! operators
+    let asset_1_decimal = query_decimals(env.contract.address, asset_infos[0])
+    let asset_2_decimal = query_decimals(env.contract.address, asset_infos[1])
+    let asset_decimals = (asset_1_decimal, asset_2_decimal);
+
+    // what is pair_key?
+    let pair_key = asset_infos[0].to_string() + asset_infos[1].to_string();
+
+     if state.pairs[pair_key]? {
+     fail "Pair already exists"
+     }
+
+    state.tmp_pair_info = {
+      pair_key,
+      asset_infos,
+      asset_decimals
+    }
+
+    send Wasm::Instantiate {
+      code_id: state.config.pair_code_id,
+      admin: env.contract.address,
+      label: "pair",
+      msg: PairInstantiateMsg {
+        asset_infos,
+        token_code_id: state.config.token_code_id,
+        asset_decimals
+      }
+    } reply(env, events, data) on success {
+      // generate and bind submessage
+      let tmp_pair_info = state.tmp_pair_info
+      
+      let pair_contract = Instantiate.parse_response(data).address
+      let pair_info = query_pair_info_from_pair(pair_contract)
+      state.pairs[tmp_pair_info.pair_key] = PairInfoRaw {
+        liquidity_token: pair_info.liquidity_token,
+        contract_addr: pair_contract,
+        asset_infos: tmp_pair_info.asset_infos,
+        asset_decimals: tmp_pair_info.asset_decimals
+      }
+
+      log {
+        pair_contract_addr: pair_contract,
+        liquidity_token_addr: pair_info.liquidity_token
+      }
+    }
+  }
+
+  exec add_native_token_decimals(denom: string, decimals: u8) {
+    if msginfo.sender != state.config.owner {
+      fail Unauthorized()
+    }
+
+    let balance = query Bank::Balance {
+      address: env.contract.address,
+      denom
+    }
+
+    if balance == 0 {
+      fail "A balance greater than zero is required by the factory for verification"
+    }
+
+    state.allow_native_token[denom] = decimals
+
+    log {
+      action: "add_allow_native_token",
+      denom,
+      decimals: string(decimals)
+    }
+  }
+
+  exec migrate_pair(contract: string, code_id: u64?) {
+    // permission check
+    if msginfo.sender != state.config.owner {
+      fail Unauthorized()
+    }
+
+    send Wasm::Migrate {
+      contract_addr: contract,
+      new_code_id: code_id ?? state.config.pair_code_id,
+      msg: binary(PairMigrateMsg {}),
+    } reply(env, events, data) on success {
+       // generate and bind submessage
+      let tmp_pair_info = state.tmp_pair_info
+      
+      let pair_contract = parse_response(data).address
+      let pair_info = query_pair_info_from_pair(pair_contract)
+      state.pairs[tmp_pair_info.pair_key] = PairInfoRaw {
+        liquidity_token: pair_info.liquidity_token,
+        contract_addr: pair_contract,
+        asset_infos: tmp_pair_info.asset_infos,
+        asset_decimals: tmp_pair_info.asset_decimals
+      }
+
+      log {
+        pair_contract_addr: pair_contract,
+        liquidity_token_addr: pair_info.liquidity_token
+      }
+    }
+  }
+
+  query config() -> ConfigResponse {
+    let config = state.config!
+    return ConfigResponse {
+      owner: state.owner,
+      token_code_id: state.token_code_id,
+      pair_code_id: state.pair_code_id
+    }
+  }
+
+  query pair(asset_infos: AssetInfo[2]) -> PairInfo {
+    let pair_info = state.pairs[pair_key]
+    return pair_info // TODO: to_normal(deps.api)
+  }
+
+  query pairs(start_after?: AssetInfo[2], limit?: u32) -> PairsResponse {
+    if start_after? {
+      let start_after = [start_after[0], start_after[1]]
+    }
+
+    let pairs = read_pairs(start_after, limit)!
+    return PairsResponse { pairs }
+  }
+
+  query native_token_decimals(denom: string) {
+    let decimals = state.allow_native_token[denom]
+    return NativeTokenDecimalsResponse { decimals }
+  }
+
+  migrate() {
+    //TODO: set_contract_version(CONTRACT_NAME, CONTRACT_VERSION)
+  }
+}
