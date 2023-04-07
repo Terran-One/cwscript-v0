@@ -1,0 +1,199 @@
+interface CW20 {
+
+  instantiate(
+    name: String,
+    symbol: String,
+    decimals: Uint8,
+    initial_balances: CW20::Coin[],
+    mint: struct MinterResponse {
+      minter: String,
+      cap?: Uint128
+    }
+  )
+
+  exec transfer(recipient: String, amount: Int)
+  exec burn(amount: Int)
+  exec mint(recipient: String)
+  exec sendFunds(contractAdd: String, amount: Int, msg: Binary)
+
+  query balance(address: String) -> struct {
+    balance: Int
+  }
+
+  query token_info() -> struct {
+    name: String,
+    symbol: String,
+    decimals: Uint8,
+    total_supply: Int,
+  }
+
+  query minter() -> CW20::MinterResponse?
+
+  // namespaced
+  struct Coin {
+    address: String,
+    amount: Uint128
+  }
+}
+
+
+contract TerraswapToken implements CW20 {
+
+  fn create_accounts(accounts: CW20::Coin[]) -> int {
+    let total_supply = 0
+    for row in accounts {
+      let addr = Address::validate(row.address)!
+      state.balances[addr] = row.amount
+      total_supply += row.amount
+    }
+    return total_supply
+  }
+
+  fn validate_accounts(accounts: CW20::Coin[]) -> none {
+    let addresses = accounts.map(c => c.address)
+    addresses.sort()
+    addresses.dedup()
+
+    if addresses.len() != accounts.len() {
+      fail DuplicateInitialBalanceAddresses()
+    }
+  }
+  
+  instantiate(
+    name: string,
+    symbol: string,
+    decimals: u8,
+    initial_balances: list<CW20::Coin>,
+    mint: MinterResponse?
+  ) { 
+    let total_supply = create_accounts(initial_balances)!
+    if mint?.cap? and total_supply > mint.cap {
+      fail "Initial supply greater than cap"
+    }
+
+    let mint = mint ?? m => MinterData {
+      minter: Address::validate(m.minter)!,
+      cap: m.cap
+    }
+
+    let data = TokenInfo {
+      name,
+      symbol,
+      decimals,
+      total_supply,
+      mint
+    }
+
+    state.token_info = data
+  }
+
+  exec transfer(recipient: string, amount: int) {
+    if amount == 0 {
+      fail InvalidZeroAmount()
+    }
+
+    try {
+      let rcpt_addr = Address::validate(recipient)!
+      state.balances[msginfo.sender] #-= amount // implicit many tries
+      state.balances[rcpt_addr] += amount // implicit many tries
+    }
+
+    log {
+      action: "transfer",
+      from: msginfo.sender,
+      to: recipient,
+      amount
+    }
+  }
+
+  exec burn(amount: int) {
+    if amount == 0 {
+      fail InvalidZeroAmount()
+    }
+
+    try {
+      state.balances[msginfo.sender] #-= amount
+      state.token_info.total_supply #-= amount
+    }
+
+    log {
+      action: "burn",
+      from: msginfo.sender,
+      amount
+    }
+  }
+
+  exec mint(recipient: string, amount: int) {
+    if amount == 0 {
+      fail InvalidZeroAmount()
+    }
+
+    if not state.config!.mint? or state.config!.mint!.minter != msginfo.sender {
+      fail Unauthorized()
+    }
+
+    try {
+      state.config!.total_supply += amount
+    }
+
+    if (let limit = state.config?.cap) and state.config!.total_supply > limit {
+      fail CannotExceedCap()
+    }
+
+    try { 
+      state.token_info = config
+      let rcpt_addr = Address::validate(recipient)!
+      state.balances[rcpt_addr] += amount
+    }
+
+    log {
+      action: "mint",
+      to: recipient,
+      amount: amount
+    }
+  }
+
+  exec sendFunds(contractAdd: string, amount: int, msg: binary) {
+    if amount == 0 {
+      fail InvalidZeroAmount()
+    }
+
+    let rcpt_addr = Address::validate(contractAdd)!
+
+    try {
+      balances[msginfo.sender] #-= amount
+      balances[rcpt_addr] += amount
+    }
+
+    log {
+      action: "send",
+      from: msginfo.sender,
+      to: contractAdd,
+      amount
+    }
+
+    send Wasm::Execute {
+      contract_addr: contractAdd,
+      msg: CW20::receive(sender, amount, msg),
+      funds: []
+    }
+  }
+
+  query balance(address: String) {
+    let address = Address::validate(address)!
+    let balance = state.balances[address]! - amount
+    return {
+      balance
+    }
+  }
+
+  query token_info() {
+    return state.token_info!
+  }
+
+  query minter() {
+    return state.token_info?.mint
+  }
+
+  log dict(sdf: s)
+}

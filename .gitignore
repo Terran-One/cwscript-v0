@@ -25,3 +25,5 @@ src/_black_version.py
 .hypothesis/
 venv/
 .ipynb_checkpoints/
+.antlr
+grammar-output
